@@ -78,7 +78,7 @@ label{white-space:nowrap}.note{color:var(--dim);font-size:12px}
 
 <div class="box"><h2>ノイズレベル（使う場所で保存）</h2>
 <div class="row"><button id="nsave">今のノイズを保存</button><button id="nclr">保存したノイズを消去</button><span id="nst" class="note"></span></div>
-<p class="note">VTXを止めた状態でしばらく表示させてから保存してください。直近の平均値を保存し、グラフに灰色の基準線として表示します。ゲイン・サンプルレート・検波を変えると、条件が合わなくなるため自動で消去されます。</p>
+<p class="note">VTXを止めた状態でしばらく表示させてから保存してください。直近の平均値を保存し、グラフに灰色の基準線として表示します。ゲイン・ステップ幅・検波を変えると、条件が合わなくなるため自動で消去されます。</p>
 </div>
 
 <div class="box"><h2>表示（適用で反映・保存）</h2>
