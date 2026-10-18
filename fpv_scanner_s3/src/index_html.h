@@ -68,6 +68,7 @@ label{white-space:nowrap}.note{color:var(--dim);font-size:12px}
 <div class="row">
  <label>ステップ幅 <select id="rate"><option value="0">40 MHz（80MS/s・既定）</option><option value="1">30 MHz（80MS/s・強い電波の映り込みに強い）</option><option value="2">15 MHz（40MS/s）</option><option value="3">7.5 MHz（20MS/s・細かい）</option></select></label>
  <label>滞在 <input type="number" id="dwell" min="5" max="500"> ms/step</label>
+ <label>スプリアス除去 <select id="spur"><option value="1">ON</option><option value="0">OFF（速い）</option></select></label>
  <label>検波 <select id="det"><option value="1">最大値</option><option value="0">平均</option></select></label>
  <label>ゲイン <input type="number" id="gain" min="-1" max="90"> <span id="grange">(-1=自動)</span></label>
  <label>dBm補正値 <input type="number" id="cal" step="0.1"> dB</label>
@@ -145,13 +146,13 @@ function showApplied(){const s=cfg;if(!s.start)return;
  const val=k=>/^m[1-4]$/.test(k)?s.markers[k[1]-1]:+s[k];
  if(pending&&(s.error||++pending.n>=2||Object.keys(pending.v).every(k=>val(k)===pending.v[k])))pending=null;
  const g=s.gain<0?'ゲイン自動(AGC)':'ゲイン '+s.gain;
- let h=`適用中: <b>${s.start}〜${s.stop} MHz</b> · <b>${FS[s.rate]} MS/s</b> · ${s.step_khz/1000} MHz幅 × <b>${s.steps}</b> ステップ · 滞在 ${s.dwell} ms · ${s.det?'最大値':'平均'} · ${g} · 補正 ${(s.cal/10).toFixed(1)} dB · 1スイープ <b>${s.sweep_ms}</b> ms`;
+ let h=`適用中: <b>${s.start}〜${s.stop} MHz</b> · <b>${FS[s.rate]} MS/s</b> · ${s.step_khz/1000} MHz幅 × <b>${s.steps}</b> ステップ · 滞在 ${s.dwell} ms · ${s.det?'最大値':'平均'} · ${g} · 補正 ${(s.cal/10).toFixed(1)} dB · スプリアス除去 ${s.spur?'ON':'OFF'} · 1スイープ <b>${s.sweep_ms}</b> ms`;
  if(pending)h+=' <span class="wait">（変更を反映中…）</span>';
  if(s.error)h+=` <span class="err">${s.error}</span>`;
  $('applied').innerHTML=h;$('nst').textContent=s.noise?'保存済み':'未保存'}
 // ---- forms: filled from the saved settings once, then edited locally until applied
 function fillForm(){const s=cfg;$('start').value=s.start;$('stop').value=s.stop;syncCenter();
- $('rate').value=s.rate;$('dwell').value=s.dwell;$('det').value=s.det;$('gain').value=s.gain;$('cal').value=(s.cal/10).toFixed(1);
+ $('rate').value=s.rate;$('spur').value=s.spur??1;$('dwell').value=s.dwell;$('det').value=s.det;$('gain').value=s.gain;$('cal').value=(s.cal/10).toFixed(1);
  document.querySelectorAll('#bandsel input').forEach(i=>i.checked=shown(i.dataset.b));
  $('hold').checked=!!s.hold;$('avg').checked=!!s.avg;$('ytop').value=s.ytop;$('yrng').value=s.yrange;
  if(s.markers)markers=s.markers.map(t=>t<0?null:t/10);renderFpv();
@@ -165,8 +166,8 @@ $('start').oninput=$('stop').oninput=syncCenter;$('center').oninput=$('span').on
 document.querySelectorAll('.pre').forEach(b=>b.onclick=()=>{$('start').value=b.dataset.a;$('stop').value=b.dataset.b;syncCenter()});
 $('zoom').onclick=()=>{const f=markers[act];if(f===null)return;$('center').value=Math.round(f);$('span').value=40;syncEdges()};
 $('applys').onclick=()=>{let a=Math.round(+$('start').value),b=Math.round(+$('stop').value);if(b-a<5)b=a+5;apply(`cfg start=${a} stop=${b}`,$('applys'))};
-['rate','dwell','det','gain','cal'].forEach(id=>$(id).oninput=()=>$('applyr').classList.add('dirty'));
-$('applyr').onclick=()=>apply(`cfg rate=${$('rate').value} dwell=${$('dwell').value} det=${$('det').value} gain=${$('gain').value} cal=${Math.round(+$('cal').value*10)}`,$('applyr'));
+['rate','spur','dwell','det','gain','cal'].forEach(id=>$(id).oninput=()=>$('applyr').classList.add('dirty'));
+$('applyr').onclick=()=>apply(`cfg rate=${$('rate').value} spur=${$('spur').value} dwell=${$('dwell').value} det=${$('det').value} gain=${$('gain').value} cal=${Math.round(+$('cal').value*10)}`,$('applyr'));
 const bs=$('bandsel');for(const b of BKEYS){const l=document.createElement('label');l.innerHTML=`<input type="checkbox" data-b="${b}"> <span style="color:${BCOL[b]}">${b}</span> `;
  l.firstChild.onchange=()=>$('applyb').classList.add('dirty');bs.appendChild(l)}
 $('applyb').onclick=()=>{let m=0;document.querySelectorAll('#bandsel input').forEach(i=>{if(i.checked)m|=1<<BKEYS.indexOf(i.dataset.b)});apply(`cfg bands=${m}`,$('applyb'))};
