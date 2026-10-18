@@ -8,7 +8,7 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(<!doctype html>
 :root{--bg:#0d1117;--panel:#161b22;--line:#30363d;--text:#e6edf3;--dim:#8b949e;--trace:#f2cc60;--peak:#ff7b72;--avg:#79c0ff}
 *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:14px system-ui,sans-serif}
 header{display:flex;justify-content:space-between;align-items:center;padding:8px 12px;background:var(--panel);border-bottom:1px solid var(--line)}
-h1{font-size:16px;margin:0}#st{font-size:12px;color:var(--dim)}#st.ok{color:#3fb950}#st.ng{color:#f85149}
+h1{font-size:16px;margin:0}#st{font-size:12px;color:var(--dim)}#applied{font-size:12px;color:var(--dim);padding:4px 12px;background:var(--panel);border-bottom:1px solid var(--line)}#applied b{color:var(--text)}#applied .err{color:#f85149}#applied .wait{color:#d29922}#st.ok{color:#3fb950}#st.ng{color:#f85149}
 main{padding:8px;max-width:1100px;margin:auto}
 #cv{width:100%;height:46vh;min-height:260px;background:#000;border:1px solid var(--line);border-radius:6px;touch-action:none;display:block}
 .row{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin:8px 0}
@@ -22,6 +22,7 @@ td.ch{cursor:pointer}td.ch small{display:block;color:var(--dim)}
 label{white-space:nowrap}
 </style></head><body>
 <header><h1>5.8GHz FPV Scanner</h1><span id="st">接続中…</span></header>
+<div id="applied"></div>
 <main>
 <canvas id="cv"></canvas>
 <div class="row">
@@ -61,10 +62,10 @@ label{white-space:nowrap}
 
 <div class="box"><h2>受信設定</h2>
 <div class="row">
- <label>サンプルレート <select id="rate"><option value="0">80 MS/s (±20MHz/step)</option><option value="1" selected>40 MS/s (±15MHz/step)</option><option value="2">20 MS/s</option><option value="3">10 MS/s</option></select></label>
+ <label>サンプルレート <select id="rate"><option value="0">80 MS/s（1ステップ40MHz幅）</option><option value="1" selected>40 MS/s（30MHz幅）</option><option value="2">20 MS/s（15MHz幅）</option><option value="3">10 MS/s（7.5MHz幅）</option></select></label>
  <label>滞在 <input type="number" id="dwell" min="5" max="500"> ms/step</label>
  <label>検波 <select id="det"><option value="1">最大値</option><option value="0">平均</option></select></label>
- <label>ゲイン <input type="number" id="gain" min="-1" max="90" title="-1 = 自動(AGC)"> (-1=自動)</label>
+ <label>ゲイン <input type="number" id="gain" min="-1" max="90" title="-1 = 自動(AGC)"> <span id="grange">(-1=自動)</span></label>
  <button id="applyr">適用</button>
 </div>
 <div class="row">
@@ -126,8 +127,9 @@ function refresh(){draw();renderMarkers();renderFpv()}
 // ---- websocket
 let ws;function connect(){ws=new WebSocket('ws://'+location.hostname+':81/');ws.binaryType='arraybuffer';
  ws.onmessage=e=>{if(typeof e.data==='string'){const s=JSON.parse(e.data);if(s.type!=='status')return;
-   const first=!cfg.start;cfg=s;$('st').textContent=s.linked?`${s.info} / 1スイープ ${s.sweep_ms} ms`:'C5未接続: '+s.info;$('st').className=s.linked?'ok':'ng';
-   if(first)fillForm();return}
+   const first=!cfg.start;if(cfg.rate!==s.rate||cfg.det!==s.det||cfg.gain!==s.gain||cfg.dwell!==s.dwell){peak=null;avg=null}
+   cfg=s;$('st').textContent=s.linked?s.info:'C5未接続';$('st').className=s.linked?'ok':'ng';
+   if(first)fillForm();if(s.error)$('gain').value=s.gain;if(s.gain_max)$('grange').textContent=`(-1=自動, 2〜${s.gain_max})`;showApplied();return}
   const v=new DataView(e.data);if(v.getUint32(0,true)!==0x31565046)return;
   const a=v.getUint32(4,true)/1000,b=v.getUint32(8,true)/1000,n=v.getUint16(12,true);
   const t=new Uint8Array(e.data,24,n);
@@ -139,7 +141,17 @@ let ws;function connect(){ws=new WebSocket('ws://'+location.hostname+':81/');ws.
  ws.onclose=()=>{$('st').textContent='切断（再接続中）';$('st').className='ng';setTimeout(connect,1500)}}
 function fillForm(){$('start').value=cfg.start;$('stop').value=cfg.stop;$('center').value=(cfg.start+cfg.stop)/2;$('span').value=cfg.stop-cfg.start;
  $('rate').value=cfg.rate;$('dwell').value=cfg.dwell;$('det').value=cfg.det;$('gain').value=cfg.gain}
-function send(s){if(ws&&ws.readyState===1)ws.send(s)}
+let pending=null;
+function showApplied(){const s=cfg;if(!s.start)return;
+ // Values the S3 clamps or rejects never match exactly, so a second completed sweep also ends the wait.
+ if(pending&&s.linked&&(s.error||++pending.$n>=2||Object.keys(pending.v).every(k=>+s[k]===pending.v[k])))pending=null;
+ const g=s.gain<0?'ゲイン自動(AGC)':'ゲイン '+s.gain;
+ let h=`適用中: <b>${s.start}〜${s.stop} MHz</b>（${s.stop-s.start} MHz） · <b>${FS[s.rate]} MS/s</b> · 1ステップ ${s.step_khz/1000} MHz幅 × <b>${s.steps}</b> ステップ · 滞在 ${s.dwell} ms · ${s.det?'最大値':'平均'} · ${g} · 1スイープ <b>${s.sweep_ms}</b> ms`;
+ if(pending)h+=' <span class="wait">（変更を反映中…）</span>';
+ if(s.error)h+=` <span class="err">${s.error}</span>`;
+ $('applied').innerHTML=h}
+function send(s){if(!(ws&&ws.readyState===1)){alert('S3に接続されていません');return}ws.send(s);
+ pending={$n:0,v:{}};s.slice(4).split(' ').forEach(kv=>{const [k,v]=kv.split('=');pending.v[k]=+v});$('applied').insertAdjacentHTML('beforeend',' <span class="wait">（変更を反映中…）</span>')}
 function setSpan(a,b){a=Math.round(a);b=Math.round(b);if(b-a<5)b=a+5;$('start').value=a;$('stop').value=b;$('center').value=(a+b)/2;$('span').value=b-a;send(`cfg start=${a} stop=${b}`)}
 // ---- controls
 $('apply').onclick=()=>setSpan(+$('start').value,+$('stop').value);

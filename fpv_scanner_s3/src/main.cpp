@@ -1,10 +1,11 @@
-/* XIAO ESP32-S3 front end: 2.4 GHz access point + web page showing a
- * 5 GHz sweep measured by an ESP-SDR XIAO ESP32-C5 over UART.
+/* XIAO ESP32-S3 front end: 2.4 GHz access point + captive-portal web page
+ * showing a 5 GHz sweep measured by an ESP-SDR XIAO ESP32-C5 over UART.
  *
  * The C5 sees about 30 MHz at a time, so the sweep task retunes it in steps,
  * runs a short on-chip spectrum (SPEC) at each step and stitches the centre
  * part of every spectrum into one trace of SWEEP_POINTS display points. */
 #include <Arduino.h>
+#include <DNSServer.h>
 #include <WebServer.h>
 #include <WebSocketsServer.h>
 #include <WiFi.h>
@@ -23,8 +24,16 @@ struct SweepConfig {
 
 static const unsigned rate_khz[] = {80000, 40000, 20000, 10000};
 
+/* Width of each sweep step: the centre 75 % of the spectrum, at most
+ * +-20 MHz (the C5's widest analog filter). */
+static double half_use_khz(unsigned rate_code) {
+    double half = rate_khz[rate_code] * 0.375;
+    return half > 20000 ? 20000 : half;
+}
+
 static WebServer http(80);
 static WebSocketsServer ws(81);
+static DNSServer dns;
 static SdrLink sdr;
 static SemaphoreHandle_t lock;
 static SweepConfig config;
@@ -34,31 +43,59 @@ static bool config_changed = true;
 static const size_t HEADER = 24;
 static uint8_t frame[HEADER + SWEEP_POINTS];
 static uint32_t frame_seq, sent_seq;
-static char status_text[256];
+static char status_text[384];
 static bool status_dirty = true;
+static unsigned gain_max;
+static char receiver_error[64];
 
 static void put32(uint8_t *p, uint32_t v) { memcpy(p, &v, 4); }
 static void put16(uint8_t *p, uint16_t v) { memcpy(p, &v, 2); }
 
-static void set_status(bool linked, const char *info, unsigned sweep_ms) {
+/* The settings reported are those of the sweep that just finished (applied),
+ * so the page can show whether a change has taken effect. */
+static void set_status(bool linked, const char *info, const SweepConfig &c, unsigned steps, unsigned sweep_ms) {
     xSemaphoreTake(lock, portMAX_DELAY);
     snprintf(status_text, sizeof(status_text),
              "{\"type\":\"status\",\"linked\":%s,\"info\":\"%s\",\"start\":%u,\"stop\":%u,\"rate\":%u,"
-             "\"dwell\":%u,\"det\":%u,\"gain\":%d,\"sweep_ms\":%u}",
-             linked ? "true" : "false", info, config.start_mhz, config.stop_mhz, config.rate_code,
-             config.dwell_ms, config.max_hold ? 1 : 0, config.gain, sweep_ms);
+             "\"dwell\":%u,\"det\":%u,\"gain\":%d,\"gain_max\":%u,\"steps\":%u,\"step_khz\":%u,"
+             "\"sweep_ms\":%u,\"error\":\"%s\"}",
+             linked ? "true" : "false", info, c.start_mhz, c.stop_mhz, c.rate_code, c.dwell_ms,
+             c.max_hold ? 1 : 0, c.gain, gain_max, steps, (unsigned)(2 * half_use_khz(c.rate_code)), sweep_ms,
+             receiver_error);
     status_dirty = true;
     xSemaphoreGive(lock);
 }
 
-static bool apply_receiver(const SweepConfig &c) {
-    char cmd[32];
+/* Returns false only when the link broke. A rejected gain falls back to
+ * the hardware AGC and is reported on the page. */
+static bool apply_receiver(SweepConfig &c) {
+    char reply[96], cmd[32];
+    receiver_error[0] = '\0';
+    if (sdr.command("LIMITS?", reply, sizeof(reply))) {
+        const char *g = strstr(reply, "\"gain\":[");
+        unsigned lo, hi;
+        if (g && sscanf(g, "\"gain\":[%u,%u", &lo, &hi) == 2) gain_max = hi;
+    }
     if (!sdr.command("BANDWIDTH 0")) return false; /* widest analog filter */
-    if (c.gain < 0)
-        strcpy(cmd, "GAIN HARDWARE");
-    else
+    if (c.gain >= 0) {
         snprintf(cmd, sizeof(cmd), "GAIN MANUAL %d", c.gain);
-    return sdr.command(cmd);
+        reply[0] = '\0';
+        if (sdr.command(cmd, reply, sizeof(reply)) && !strcmp(reply, "OK")) return true;
+        if (strncmp(reply, "ERR", 3)) return false;
+        snprintf(receiver_error, sizeof(receiver_error), "gain %d rejected (2-%u), using AGC", c.gain, gain_max);
+        c.gain = -1;
+        xSemaphoreTake(lock, portMAX_DELAY);
+        config.gain = -1;
+        xSemaphoreGive(lock);
+    }
+    return sdr.command("GAIN HARDWARE");
+}
+
+static bool changed_since_start(void) {
+    xSemaphoreTake(lock, portMAX_DELAY);
+    bool changed = config_changed;
+    xSemaphoreGive(lock);
+    return changed;
 }
 
 static void sweep_task(void *) {
@@ -68,12 +105,17 @@ static void sweep_task(void *) {
     SweepConfig c;
     for (;;) {
         if (!sdr.connected()) {
-            set_status(false, "C5 not found", 0);
+            xSemaphoreTake(lock, portMAX_DELAY);
+            c = config;
+            xSemaphoreGive(lock);
+            set_status(false, "C5 not found", c, 0, 0);
             if (!sdr.connect()) {
                 delay(1000);
                 continue;
             }
+            xSemaphoreTake(lock, portMAX_DELAY);
             config_changed = true;
+            xSemaphoreGive(lock);
         }
         xSemaphoreTake(lock, portMAX_DELAY);
         c = config;
@@ -85,17 +127,20 @@ static void sweep_task(void *) {
             continue;
         }
 
-        /* Use the centre 75 % of each spectrum, at most +-20 MHz (analog filter),
-         * and skip the bins next to the LO, where DC correction leaves residue. */
-        const double fs = rate_khz[c.rate_code];
-        const double half_use = fs * 0.375 > 20000 ? 20000 : fs * 0.375;
+        /* Skip the bins next to the LO, where DC correction leaves residue. */
+        const double fs = rate_khz[c.rate_code], half_use = half_use_khz(c.rate_code);
         const double start = c.start_mhz * 1000.0, stop = c.stop_mhz * 1000.0, span = stop - start;
         const unsigned steps = (unsigned)ceil(span / (2 * half_use));
         memset(trace, 0, sizeof(trace));
         memset(filled, 0, sizeof(filled));
         uint32_t t0 = millis();
-        bool ok = true;
+        bool ok = true, restarted = false;
         for (unsigned s = 0; s < steps && ok; s++) {
+            /* A new setting restarts the sweep instead of waiting for it to end. */
+            if (changed_since_start()) {
+                restarted = true;
+                break;
+            }
             unsigned centre_mhz = (unsigned)lround((start + (2 * s + 1) * half_use) / 1000.0);
             ok = sdr.spectrum(centre_mhz, c.rate_code, c.fft_n, c.dwell_ms, c.max_hold, bins);
             if (!ok) break;
@@ -116,6 +161,7 @@ static void sweep_task(void *) {
             sdr.connect(); /* resynchronize after a broken transfer */
             continue;
         }
+        if (restarted) continue;
         /* Points narrower than one FFT bin (small spans) are interpolated. */
         int last = -1;
         for (int i = 0; i < SWEEP_POINTS; i++) {
@@ -140,14 +186,16 @@ static void sweep_task(void *) {
         frame[23] = 0;
         memcpy(frame + HEADER, trace, SWEEP_POINTS);
         xSemaphoreGive(lock);
-        set_status(true, sdr.info(), sweep_ms);
+        set_status(true, sdr.info(), c, steps, sweep_ms);
     }
 }
 
 /* "cfg start=5650 stop=5950 rate=1 dwell=25 det=1 gain=-1" */
 static void handle_text(const char *text) {
     if (strncmp(text, "cfg", 3)) return;
+    xSemaphoreTake(lock, portMAX_DELAY);
     SweepConfig c = config;
+    xSemaphoreGive(lock);
     const char *p = text + 3;
     char key[16];
     int value, used;
@@ -179,14 +227,23 @@ static void on_ws(uint8_t client, WStype_t type, uint8_t *payload, size_t length
     }
 }
 
+/* Captive portal: every DNS name resolves to us, and any unknown URL
+ * (including the OS connectivity checks) redirects to the scanner page. */
+static void redirect_to_portal() {
+    http.sendHeader("Location", String("http://") + WiFi.softAPIP().toString() + "/", true);
+    http.send(302, "text/plain", "");
+}
+
 void setup() {
     Serial.begin(115200);
     lock = xSemaphoreCreateMutex();
     WiFi.mode(WIFI_AP);
     WiFi.softAP(AP_SSID, AP_PASSWORD, AP_CHANNEL);
     WiFi.setSleep(false);
+    dns.setErrorReplyCode(DNSReplyCode::NoError);
+    dns.start(53, "*", WiFi.softAPIP());
     http.on("/", [] { http.send_P(200, "text/html", INDEX_HTML); });
-    http.onNotFound([] { http.send(404, "text/plain", "not found"); });
+    http.onNotFound(redirect_to_portal);
     http.begin();
     ws.begin();
     ws.onEvent(on_ws);
@@ -197,7 +254,8 @@ void setup() {
 
 void loop() {
     static uint8_t out[HEADER + SWEEP_POINTS];
-    static char status_out[256];
+    static char status_out[sizeof(status_text)];
+    dns.processNextRequest();
     http.handleClient();
     ws.loop();
     bool send_frame = false, send_status = false;
