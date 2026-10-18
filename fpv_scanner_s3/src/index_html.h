@@ -21,6 +21,10 @@ td.ch{cursor:pointer}#mt td:first-child,#mt th:first-child{width:1%;white-space:
 </style></head><body>
 <header><span id="info">-</span><span id="err" class="err"></span><span id="st">接続中…</span></header>
 <main>
+<div class="row">
+ <label><input type="checkbox" id="hold">ピークホールド</label><button id="preset">リセット</button><label><input type="checkbox" id="avg">平均</label>
+ <label>上限 <input type="number" id="ytop"> dBm</label><label>範囲 <input type="number" id="yrng"> dB</label>
+</div>
 <canvas id="cv"></canvas>
 
 <div class="box">
@@ -53,11 +57,6 @@ td.ch{cursor:pointer}#mt td:first-child,#mt th:first-child{width:1%;white-space:
  ノイズ <button id="nsave">保存</button><button id="nclr">消去</button><span id="nst"></span>
 </div></div>
 
-<div class="box"><div class="row">
- <label><input type="checkbox" id="hold">ピークホールド</label><label><input type="checkbox" id="avg">平均</label>
- <label>上限 <input type="number" id="ytop"> dBm</label><label>範囲 <input type="number" id="yrng"> dB</label>
- <button id="applyd">適用</button>
-</div></div>
 </main>
 <script>
 const BANDS={A:[5865,5845,5825,5805,5785,5765,5745,5725],B:[5733,5752,5771,5790,5809,5828,5847,5866],
@@ -103,11 +102,17 @@ function fillForm(s){$('start').value=s.start;$('stop').value=s.stop;$('rate').v
 function send(t){if(ws&&ws.readyState===1){ws.send(t);return true}alert('S3に接続されていません');return false}
 function apply(t,btn){if(send(t))btn.classList.remove('dirty')}
 const dirtyOn=(ids,btn)=>ids.forEach(id=>$(id).oninput=()=>$(btn).classList.add('dirty'));
-dirtyOn(['start','stop'],'applys');dirtyOn(['rate','dwell','det','gain','cal'],'applyr');dirtyOn(['hold','avg','ytop','yrng'],'applyd');
+dirtyOn(['start','stop'],'applys');dirtyOn(['rate','dwell','det','gain','cal'],'applyr');
 document.querySelectorAll('.pre').forEach(b=>b.onclick=()=>{$('start').value=b.dataset.a;$('stop').value=b.dataset.b;$('applys').classList.add('dirty')});
 $('applys').onclick=()=>{const a=Math.round(+$('start').value),b=Math.max(a+5,Math.round(+$('stop').value));apply(`cfg start=${a} stop=${b}`,$('applys'))};
 $('applyr').onclick=()=>apply(`cfg rate=${$('rate').value} dwell=${$('dwell').value} det=${$('det').value} gain=${$('gain').value} cal=${Math.round(+$('cal').value*10)}`,$('applyr'));
-$('applyd').onclick=()=>apply(`cfg hold=${+$('hold').checked} avg=${+$('avg').checked} ytop=${Math.round(+$('ytop').value)} yrange=${Math.round(+$('yrng').value)}`,$('applyd'));
+// Display settings take effect at once; the S3 saves them after typing pauses.
+let dispTimer,dispEdit=0;
+function display(){const top=Math.round(+$('ytop').value),yr=Math.round(+$('yrng').value);if(!isFinite(top)||!(yr>=10))return;
+ dispEdit=Date.now();if($('hold').checked&&!cfg.hold)peak=null;cfg.hold=+$('hold').checked;cfg.avg=+$('avg').checked;cfg.ytop=top;cfg.yrange=yr;redraw();
+ clearTimeout(dispTimer);dispTimer=setTimeout(()=>{if(ws&&ws.readyState===1)ws.send(`cfg hold=${cfg.hold} avg=${cfg.avg} ytop=${top} yrange=${yr}`)},500)}
+['hold','avg','ytop','yrng'].forEach(id=>$(id).oninput=display);
+$('preset').onclick=()=>{peak=null;redraw()};
 for(const b of BK){const l=document.createElement('label');l.innerHTML=`<input type="checkbox" data-b="${b}"><span style="color:${BCOL[b]}">${b}</span> `;
  l.firstChild.onchange=()=>$('applyb').classList.add('dirty');$('bandsel').appendChild(l)}
 $('applyb').onclick=()=>{let m=0;document.querySelectorAll('#bandsel input').forEach(i=>{if(i.checked)m|=1<<BK.indexOf(i.dataset.b)});apply(`cfg bands=${m}`,$('applyb'))};
@@ -123,7 +128,9 @@ $('nsave').onclick=()=>{if(!avg)return;const n=avg.length,b=new ArrayBuffer(24+n
  v.setUint32(4,Math.round(f0*1000),true);v.setUint32(8,Math.round(f1*1000),true);v.setUint16(12,n,true);new Uint8Array(b,24).set(avg.map(Math.round));send(b)};
 $('nclr').onclick=()=>{if(send('noise clear')){noise=null;redraw()}};
 // ---- websocket; a connection silent for 5 s is replaced
-function onStatus(s){const first=!cfg.start;if(cfg.rate!==s.rate||cfg.det!==s.det||cfg.gain!==s.gain){peak=null;avg=null}
+function onStatus(s){
+ // Until the S3 has the latest display edit, a status report must not undo it.
+ if(Date.now()-dispEdit<3000)for(const k of['hold','avg','ytop','yrange'])s[k]=cfg[k];const first=!cfg.start;if(cfg.rate!==s.rate||cfg.det!==s.det||cfg.gain!==s.gain){peak=null;avg=null}
  if(!s.noise)noise=null;cfg=s;if(first)fillForm(s);
  $('st').textContent=s.linked?'C5接続':'C5未接続';$('st').className=s.linked?'ok':'ng';
  $('info').textContent=`${s.start}-${s.stop}MHz ${s.steps}step ${s.sweep_ms}ms`;$('nst').textContent=s.noise?'保存済み':'';
