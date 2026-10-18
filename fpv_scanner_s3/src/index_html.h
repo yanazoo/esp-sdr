@@ -29,6 +29,7 @@ label{white-space:nowrap}.note{color:var(--dim);font-size:12px}
 <div id="applied"></div>
 <main>
 <canvas id="cv"></canvas>
+<div id="warn" class="err note" style="display:none">入力が強すぎる可能性があります（受信機が飽和すると、実在しない位置に電波が表示されます）。ゲインを下げるか、送信機から離してください。</div>
 
 <div class="box"><h2>マーカー（M1〜M4を選び、グラフまたは下のチャネル表をタップして配置。「保存」で次回起動時も同じ位置）</h2>
 <div class="row">
@@ -65,7 +66,7 @@ label{white-space:nowrap}.note{color:var(--dim);font-size:12px}
 
 <div class="box"><h2>受信設定（適用で反映・保存）</h2>
 <div class="row">
- <label>サンプルレート <select id="rate"><option value="0">80 MS/s（1ステップ40MHz幅）</option><option value="1">40 MS/s（30MHz幅）</option><option value="2">20 MS/s（15MHz幅）</option><option value="3">10 MS/s（7.5MHz幅）</option></select></label>
+ <label>ステップ幅 <select id="rate"><option value="0">40 MHz（80MS/s・速い）</option><option value="1">30 MHz（80MS/s・標準）</option><option value="2">15 MHz（40MS/s）</option><option value="3">7.5 MHz（20MS/s・細かい）</option></select></label>
  <label>滞在 <input type="number" id="dwell" min="5" max="500"> ms/step</label>
  <label>検波 <select id="det"><option value="1">最大値</option><option value="0">平均</option></select></label>
  <label>ゲイン <input type="number" id="gain" min="-1" max="90"> <span id="grange">(-1=自動)</span></label>
@@ -84,8 +85,8 @@ label{white-space:nowrap}.note{color:var(--dim);font-size:12px}
 <div class="row">
  <label><input type="checkbox" id="hold"> ピークホールド</label>
  <label><input type="checkbox" id="avg"> 平均</label>
- <label>上限 <input type="number" id="ytop" value="-20"> dBm</label>
- <label>範囲 <input type="number" id="yrng" value="90"> dB</label>
+ <label>上限 <input type="number" id="ytop" value="-17"> dBm</label>
+ <label>範囲 <input type="number" id="yrng" value="75"> dB</label>
 </div>
 <div class="row"><button id="applyd">適用</button></div></div>
 <p class="note">5895MHz超は実機で受信可否を確認してください。</p>
@@ -95,7 +96,7 @@ const BANDS={A:[5865,5845,5825,5805,5785,5765,5745,5725],B:[5733,5752,5771,5790,
 E:[5705,5685,5665,5645,5885,5905,5925,5945],F:[5740,5760,5780,5800,5820,5840,5860,5880],R:[5658,5695,5732,5769,5806,5843,5880,5917]};
 const BNAME={A:'Boscam A / TBS / RC305',B:'Boscam B',E:'Boscam E / DJI',F:'IRC NexWave / Fatshark',R:'Raceband'};
 const BKEYS=Object.keys(BANDS),BCOL={A:'#ff9e64',B:'#9ece6a',E:'#bb9af7',F:'#7dcfff',R:'#f7768e'};
-const MCOL=['#ff6','#6ff','#f6f','#6f6'],FS=[80,40,20,10];
+const MCOL=['#ff6','#6ff','#f6f','#6f6'],FS=[80,80,40,20];
 let cfg={},data=null,peak=null,avg=null,noise=null,f0=5650,f1=5850,act=0,markers=[null,null,null,null];
 const $=id=>document.getElementById(id),cv=$('cv'),ctx=cv.getContext('2d');
 const cal=()=>(cfg.cal||0)/10;
@@ -110,7 +111,7 @@ function nearestCh(f){let best=null;for(const b of BKEYS)BANDS[b].forEach((c,k)=
 function resize(){const r=window.devicePixelRatio||1;cv.width=cv.clientWidth*r;cv.height=cv.clientHeight*r;draw()}
 function draw(){
  const W=cv.width,H=cv.height,r=window.devicePixelRatio||1,L=44*r,B=22*r,T=6*r,R=10*r,pw=W-L-R,ph=H-T-B;
- const ytop=cfg.ytop??-20,yr=cfg.yrange||90;
+ const ytop=cfg.ytop??-17,yr=cfg.yrange||75;
  const X=f=>L+(f-f0)/(f1-f0)*pw,Y=d=>Math.min(T+ph,Math.max(T,T+(ytop-d)/yr*ph));
  ctx.fillStyle='#000';ctx.fillRect(0,0,W,H);ctx.font=(11*r)+'px system-ui';ctx.lineWidth=1;
  ctx.strokeStyle='#222';ctx.fillStyle='#8b949e';ctx.textAlign='right';
@@ -197,6 +198,8 @@ let ws;function connect(){ws=new WebSocket('ws://'+location.hostname+':81/');ws.
   if(magic!==0x31565046)return;
   if(a!==f0||b!==f1||!data||data.length!==n){f0=a;f1=b;peak=null;avg=null}
   data=Uint8Array.from(t);
+  // Wide signals near -30 dBFS per bin already add up to ADC full scale.
+  let top=0;for(let i=0;i<n;i++)if(t[i]>top)top=t[i];$('warn').style.display=top/2-84.3>-30?'':'none';
   peak=peak?peak.map((p,i)=>Math.max(p,t[i])):Uint8Array.from(t);
   avg=avg?avg.map((p,i)=>p*0.8+t[i]*0.2):Float32Array.from(t);
   draw();renderMarkers()};

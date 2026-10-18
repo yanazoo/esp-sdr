@@ -16,8 +16,7 @@
 
 struct SweepConfig {
     unsigned start_mhz = DEFAULT_START_MHZ, stop_mhz = DEFAULT_STOP_MHZ;
-    unsigned rate_code = 1; /* 0: 80, 1: 40, 2: 20, 3: 10 MS/s */
-    unsigned fft_n = 1024;
+    unsigned rate_code = 1; /* step plan, see steps[]: 0: 40, 1: 30, 2: 15, 3: 7.5 MHz */
     unsigned dwell_ms = 25;
     bool max_hold = true;
     int gain = -1; /* -1: hardware AGC, otherwise a PHY gain index */
@@ -26,16 +25,26 @@ struct SweepConfig {
     unsigned bands = 0x11;   /* FPV band lines shown: bit 0 A, 1 B, 2 E, 3 F, 4 R */
     int markers[4] = {-1, -1, -1, -1}; /* tenths of MHz, -1 = unset */
     bool hold = false, avg = false;    /* peak-hold / averaged trace */
-    int ytop = -20, yrange = 90;       /* graph top (dBm) and height (dB) */
+    int ytop = -17, yrange = 75;       /* graph top (dBm) and height (dB) */
 };
 
-static const unsigned rate_khz[] = {80000, 40000, 20000, 10000};
-
-/* Width of each sweep step: the centre 75 % of the spectrum, at most
- * +-20 MHz (the C5's widest analog filter). */
-static double half_use_khz(unsigned rate_code) {
-    double half = rate_khz[rate_code] * 0.375;
-    return half > 20000 ? 20000 : half;
+/* Each step keeps only +-half_khz around the LO. The capture rate is at
+ * least four times that and the analog filter is narrowed to the step,
+ * so strong signals outside the step are attenuated before they can fold
+ * (alias) into it. With the widest filter at 40 MS/s, a strong VTX showed
+ * up in neighbouring steps at the wrong frequency. */
+struct StepPlan {
+    unsigned half_khz, rate_code, fft_n, bandwidth_mhz;
+};
+static const StepPlan steps_plan[] = {
+    {20000, 0, 2048, 44}, /* 40 MHz steps, 80 MS/s, 39 kHz bins */
+    {15000, 0, 2048, 32}, /* 30 MHz steps, 80 MS/s, 39 kHz bins */
+    {7500, 1, 2048, 16},  /* 15 MHz steps, 40 MS/s, 20 kHz bins */
+    {3750, 2, 2048, 11},  /* 7.5 MHz steps, 20 MS/s, 10 kHz bins */
+};
+static const unsigned capture_khz[] = {80000, 40000, 20000};
+static double half_use_khz(unsigned plan) {
+    return steps_plan[plan].half_khz;
 }
 
 static WebServer http(80);
@@ -152,7 +161,8 @@ static bool apply_receiver(SweepConfig &c) {
         unsigned lo, hi;
         if (g && sscanf(g, "\"gain\":[%u,%u", &lo, &hi) == 2) gain_max = hi;
     }
-    if (!sdr.command("BANDWIDTH 0")) return false; /* widest analog filter */
+    snprintf(cmd, sizeof(cmd), "BANDWIDTH %u", steps_plan[c.rate_code].bandwidth_mhz);
+    if (!sdr.command(cmd)) return false;
     if (c.gain >= 0) {
         snprintf(cmd, sizeof(cmd), "GAIN MANUAL %d", c.gain);
         reply[0] = '\0';
@@ -205,7 +215,9 @@ static void sweep_task(void *) {
         }
 
         /* Skip the bins next to the LO, where DC correction leaves residue. */
-        const double fs = rate_khz[c.rate_code], half_use = half_use_khz(c.rate_code);
+        const StepPlan &plan = steps_plan[c.rate_code];
+        const unsigned fft_n = plan.fft_n;
+        const double fs = capture_khz[plan.rate_code], half_use = plan.half_khz;
         const double start = c.start_mhz * 1000.0, stop = c.stop_mhz * 1000.0, span = stop - start;
         const unsigned steps = (unsigned)ceil(span / (2 * half_use));
         memset(trace, 0, sizeof(trace));
@@ -219,12 +231,12 @@ static void sweep_task(void *) {
                 break;
             }
             unsigned centre_mhz = (unsigned)lround((start + (2 * s + 1) * half_use) / 1000.0);
-            ok = sdr.spectrum(centre_mhz, c.rate_code, c.fft_n, c.dwell_ms, c.max_hold, bins);
+            ok = sdr.spectrum(centre_mhz, plan.rate_code, fft_n, c.dwell_ms, c.max_hold, bins);
             if (!ok) break;
-            for (unsigned k = 0; k < c.fft_n; k++) {
-                int signed_k = k < c.fft_n / 2 ? (int)k : (int)k - (int)c.fft_n;
+            for (unsigned k = 0; k < fft_n; k++) {
+                int signed_k = k < fft_n / 2 ? (int)k : (int)k - (int)fft_n;
                 if (abs(signed_k) <= 2) continue;
-                double offset = signed_k * fs / c.fft_n;
+                double offset = signed_k * fs / fft_n;
                 if (fabs(offset) > half_use) continue;
                 double f = centre_mhz * 1000.0 + offset;
                 if (f < start || f >= stop) continue;
