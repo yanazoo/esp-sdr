@@ -19,7 +19,7 @@ struct SweepConfig {
     unsigned rate_code = 0; /* step plan, see steps[]: 0: 40, 1: 30, 2: 15, 3: 7.5 MHz */
     unsigned dwell_ms = 25;
     bool max_hold = true;
-    bool spur_reject = true; /* measure every point from two LOs, keep the lower */
+    bool spur_reject = false; /* measure every point from two LOs, keep the lower */
     int gain = 10; /* -1: hardware AGC, otherwise a PHY gain index */
     /* Display only; changing them does not restart the sweep. */
     int cal_tenths = 0;      /* dBm = dBFS + cal_tenths / 10 */
@@ -226,12 +226,9 @@ static void sweep_task(void *) {
         const unsigned fft_n = plan.fft_n;
         const double fs = capture_khz[plan.rate_code], half_use = plan.half_khz;
         const double start = c.start_mhz * 1000.0, stop = c.stop_mhz * 1000.0, span = stop - start;
-        /* Spur rejection: the C5 shows a strong signal a second time, at the
-         * wrong frequency, from some LO settings (R2 at 5695 MHz reappeared
-         * at 5760-5770 MHz with the LO at 5750 MHz, as strong as the real
-         * one at every gain). LOs spaced half a step apart see each point
-         * twice at different offsets; a real signal appears in both, a spur
-         * in only one, so the lower of the two is kept. */
+        /* Optional spur rejection: LOs spaced half a step apart see each
+         * point twice at different offsets; a real signal appears in both,
+         * a receiver spur or image in only one, so the lower is kept. */
         const double spacing = c.spur_reject ? half_use : 2 * half_use;
         const unsigned steps = c.spur_reject ? (unsigned)ceil(span / spacing) + 1 : (unsigned)ceil(span / spacing);
         memset(trace, 0, sizeof(trace));
@@ -252,7 +249,10 @@ static void sweep_task(void *) {
             for (unsigned k = 0; k < fft_n; k++) {
                 int signed_k = k < fft_n / 2 ? (int)k : (int)k - (int)fft_n;
                 if (abs(signed_k) <= 2) continue;
-                double offset = signed_k * fs / fft_n;
+                /* On 5 GHz the C5 delivers the spectrum inverted: with the LO at
+                 * 5710 MHz, R2 (5695) showed at 5725 and R3 (5732) at 5688,
+                 * mirrored about the LO in every step for R2..R5. */
+                double offset = (centre_mhz >= 4000 ? -signed_k : signed_k) * fs / fft_n;
                 if (fabs(offset) > half_use) continue;
                 double f = centre_mhz * 1000.0 + offset;
                 if (f < start || f >= stop) continue;
