@@ -24,6 +24,9 @@ struct SweepConfig {
     /* Display only; changing them does not restart the sweep. */
     int cal_tenths = 0;      /* dBm = dBFS + cal_tenths / 10 */
     unsigned bands = 0x11;   /* FPV band lines shown: bit 0 A, 1 B, 2 E, 3 F, 4 R */
+    int markers[4] = {-1, -1, -1, -1}; /* tenths of MHz, -1 = unset */
+    bool hold = false, avg = false;    /* peak-hold / averaged trace */
+    int ytop = -20, yrange = 90;       /* graph top (dBm) and height (dB) */
 };
 
 static const unsigned rate_khz[] = {80000, 40000, 20000, 10000};
@@ -47,7 +50,7 @@ static bool config_changed = true;
 static const size_t HEADER = 24;
 static uint8_t frame[HEADER + SWEEP_POINTS];
 static uint32_t frame_seq, sent_seq;
-static char status_text[512];
+static char status_text[640];
 static bool status_dirty = true;
 static unsigned gain_max;
 static char receiver_error[64];
@@ -69,7 +72,15 @@ static void load_settings() {
     c.gain = prefs.getInt("gain", c.gain);
     c.cal_tenths = prefs.getInt("cal", c.cal_tenths);
     c.bands = prefs.getUInt("bands", c.bands);
-    has_noise = prefs.getBytes("noise", noise, sizeof(noise)) == sizeof(noise) && !memcmp(noise, "NSE1", 4);
+    prefs.getBytes("markers", c.markers, sizeof(c.markers));
+    c.hold = prefs.getBool("hold", c.hold);
+    c.avg = prefs.getBool("avg", c.avg);
+    c.ytop = prefs.getInt("ytop", c.ytop);
+    c.yrange = prefs.getInt("yrange", c.yrange);
+    /* NSE2: references saved by earlier builds did not track the receiver
+     * settings they were taken with, so they are discarded once. */
+    has_noise = prefs.getBytes("noise", noise, sizeof(noise)) == sizeof(noise) && !memcmp(noise, "NSE2", 4);
+    if (!has_noise && prefs.isKey("noise")) prefs.remove("noise");
 }
 
 static void save_settings() {
@@ -85,6 +96,11 @@ static void save_settings() {
     prefs.putInt("gain", c.gain);
     prefs.putInt("cal", c.cal_tenths);
     prefs.putUInt("bands", c.bands);
+    prefs.putBytes("markers", c.markers, sizeof(c.markers));
+    prefs.putBool("hold", c.hold);
+    prefs.putBool("avg", c.avg);
+    prefs.putInt("ytop", c.ytop);
+    prefs.putInt("yrange", c.yrange);
 }
 
 static void put32(uint8_t *p, uint32_t v) { memcpy(p, &v, 4); }
@@ -108,10 +124,13 @@ static void set_status(bool linked, const char *info, const SweepConfig &c, unsi
     snprintf(status_text, sizeof(status_text),
              "{\"type\":\"status\",\"linked\":%s,\"info\":\"%s\",\"start\":%u,\"stop\":%u,\"rate\":%u,"
              "\"dwell\":%u,\"det\":%u,\"gain\":%d,\"gain_max\":%u,\"steps\":%u,\"step_khz\":%u,"
-             "\"sweep_ms\":%u,\"error\":\"%s\",\"cal\":%d,\"bands\":%u,\"noise\":%s}",
+             "\"sweep_ms\":%u,\"error\":\"%s\",\"cal\":%d,\"bands\":%u,\"noise\":%s,"
+             "\"markers\":[%d,%d,%d,%d],\"hold\":%u,\"avg\":%u,\"ytop\":%d,\"yrange\":%d}",
              linked ? "true" : "false", info, c.start_mhz, c.stop_mhz, c.rate_code, c.dwell_ms,
              c.max_hold ? 1 : 0, c.gain, gain_max, steps, (unsigned)(2 * half_use_khz(c.rate_code)), sweep_ms,
-             receiver_error, config.cal_tenths, config.bands, has_noise ? "true" : "false");
+             receiver_error, config.cal_tenths, config.bands, has_noise ? "true" : "false", config.markers[0],
+             config.markers[1], config.markers[2], config.markers[3], config.hold, config.avg, config.ytop,
+             config.yrange);
     status_dirty = true;
     xSemaphoreGive(lock);
 }
@@ -248,7 +267,8 @@ static void sweep_task(void *) {
     }
 }
 
-/* "cfg start=5650 stop=5850 rate=1 dwell=25 det=1 gain=-1 cal=0 bands=17",
+/* "cfg start=5650 stop=5850 rate=1 dwell=25 det=1 gain=-1 cal=0 bands=17
+ *  m1=58000 m2=-1 m3=-1 m4=-1 hold=0 avg=0 ytop=-20 yrange=90",
  * sent by the page's apply buttons; every accepted change is saved. */
 static void handle_text(const char *text) {
     if (strncmp(text, "cfg", 3)) return;
@@ -258,7 +278,7 @@ static void handle_text(const char *text) {
     const char *p = text + 3;
     char key[16];
     int value, used;
-    while (sscanf(p, " %15[a-z]=%d%n", key, &value, &used) == 2) {
+    while (sscanf(p, " %15[a-z0-9]=%d%n", key, &value, &used) == 2) {
         p += used;
         if (!strcmp(key, "start")) c.start_mhz = constrain(value, 2300, 5995);
         else if (!strcmp(key, "stop")) c.stop_mhz = constrain(value, 2305, 6000);
@@ -268,6 +288,12 @@ static void handle_text(const char *text) {
         else if (!strcmp(key, "gain")) c.gain = constrain(value, -1, 90);
         else if (!strcmp(key, "cal")) c.cal_tenths = constrain(value, -1000, 1000);
         else if (!strcmp(key, "bands")) c.bands = value & 0x1f;
+        else if (key[0] == 'm' && key[1] >= '1' && key[1] <= '4' && !key[2])
+            c.markers[key[1] - '1'] = value < 0 ? -1 : constrain(value, 23000, 60000);
+        else if (!strcmp(key, "hold")) c.hold = value != 0;
+        else if (!strcmp(key, "avg")) c.avg = value != 0;
+        else if (!strcmp(key, "ytop")) c.ytop = constrain(value, -150, 50);
+        else if (!strcmp(key, "yrange")) c.yrange = constrain(value, 10, 150);
     }
     if (c.stop_mhz < c.start_mhz + 5) c.stop_mhz = c.start_mhz + 5;
     xSemaphoreTake(lock, portMAX_DELAY);
@@ -275,14 +301,21 @@ static void handle_text(const char *text) {
     if (c.start_mhz != o.start_mhz || c.stop_mhz != o.stop_mhz || c.rate_code != o.rate_code ||
         c.dwell_ms != o.dwell_ms || c.max_hold != o.max_hold || c.gain != o.gain)
         config_changed = true;
+    /* A noise reference taken at another gain, rate or detector no longer
+     * matches the trace, so it is dropped rather than shown misleadingly. */
+    bool drop_noise = has_noise && (c.gain != o.gain || c.rate_code != o.rate_code || c.max_hold != o.max_hold);
     config = c;
     settings_dirty = true;
     xSemaphoreGive(lock);
+    if (drop_noise) {
+        has_noise = false;
+        prefs.remove("noise");
+    }
     refresh_status();
 }
 
 static void store_noise(const uint8_t *data, size_t length) {
-    if (length != sizeof(noise) || memcmp(data, "NSE1", 4)) return;
+    if (length != sizeof(noise) || memcmp(data, "NSE2", 4)) return;
     memcpy(noise, data, sizeof(noise));
     has_noise = true;
     prefs.putBytes("noise", noise, sizeof(noise));
@@ -300,8 +333,8 @@ static void on_ws(uint8_t client, WStype_t type, uint8_t *payload, size_t length
         memcpy(text, payload, n);
         text[n] = '\0';
         if (!strcmp(text, "noise clear")) {
+            if (has_noise) prefs.remove("noise");
             has_noise = false;
-            prefs.remove("noise");
             refresh_status();
         } else
             handle_text(text);
