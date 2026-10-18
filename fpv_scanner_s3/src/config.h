@@ -15,5 +15,5 @@
 
 /* ---- Default sweep ------------------------------------------------- */
 #define DEFAULT_START_MHZ 5650
-#define DEFAULT_STOP_MHZ  5950
+#define DEFAULT_STOP_MHZ  5850
 #define SWEEP_POINTS      1000  /* display points sent to the browser */

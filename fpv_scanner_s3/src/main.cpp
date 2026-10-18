@@ -6,6 +6,7 @@
  * part of every spectrum into one trace of SWEEP_POINTS display points. */
 #include <Arduino.h>
 #include <DNSServer.h>
+#include <Preferences.h>
 #include <WebServer.h>
 #include <WebSocketsServer.h>
 #include <WiFi.h>
@@ -20,6 +21,9 @@ struct SweepConfig {
     unsigned dwell_ms = 25;
     bool max_hold = true;
     int gain = -1; /* -1: hardware AGC, otherwise a PHY gain index */
+    /* Display only; changing them does not restart the sweep. */
+    int cal_tenths = 0;      /* dBm = dBFS + cal_tenths / 10 */
+    unsigned bands = 0x11;   /* FPV band lines shown: bit 0 A, 1 B, 2 E, 3 F, 4 R */
 };
 
 static const unsigned rate_khz[] = {80000, 40000, 20000, 10000};
@@ -43,27 +47,80 @@ static bool config_changed = true;
 static const size_t HEADER = 24;
 static uint8_t frame[HEADER + SWEEP_POINTS];
 static uint32_t frame_seq, sent_seq;
-static char status_text[384];
+static char status_text[512];
 static bool status_dirty = true;
 static unsigned gain_max;
 static char receiver_error[64];
+static bool settings_dirty;
+
+/* Noise reference saved from the page: same layout as a sweep frame. */
+static uint8_t noise[HEADER + SWEEP_POINTS];
+static bool has_noise;
+static Preferences prefs;
+
+static void load_settings() {
+    prefs.begin("fpv", false);
+    SweepConfig &c = config;
+    c.start_mhz = prefs.getUInt("start", c.start_mhz);
+    c.stop_mhz = prefs.getUInt("stop", c.stop_mhz);
+    c.rate_code = prefs.getUInt("rate", c.rate_code);
+    c.dwell_ms = prefs.getUInt("dwell", c.dwell_ms);
+    c.max_hold = prefs.getBool("det", c.max_hold);
+    c.gain = prefs.getInt("gain", c.gain);
+    c.cal_tenths = prefs.getInt("cal", c.cal_tenths);
+    c.bands = prefs.getUInt("bands", c.bands);
+    has_noise = prefs.getBytes("noise", noise, sizeof(noise)) == sizeof(noise) && !memcmp(noise, "NSE1", 4);
+}
+
+static void save_settings() {
+    xSemaphoreTake(lock, portMAX_DELAY);
+    SweepConfig c = config;
+    settings_dirty = false;
+    xSemaphoreGive(lock);
+    prefs.putUInt("start", c.start_mhz);
+    prefs.putUInt("stop", c.stop_mhz);
+    prefs.putUInt("rate", c.rate_code);
+    prefs.putUInt("dwell", c.dwell_ms);
+    prefs.putBool("det", c.max_hold);
+    prefs.putInt("gain", c.gain);
+    prefs.putInt("cal", c.cal_tenths);
+    prefs.putUInt("bands", c.bands);
+}
 
 static void put32(uint8_t *p, uint32_t v) { memcpy(p, &v, 4); }
 static void put16(uint8_t *p, uint16_t v) { memcpy(p, &v, 2); }
 
 /* The settings reported are those of the sweep that just finished (applied),
  * so the page can show whether a change has taken effect. */
+static struct {
+    bool linked;
+    const char *info = "";
+    SweepConfig c;
+    unsigned steps, sweep_ms;
+} last;
 static void set_status(bool linked, const char *info, const SweepConfig &c, unsigned steps, unsigned sweep_ms) {
     xSemaphoreTake(lock, portMAX_DELAY);
+    last.linked = linked;
+    last.info = info;
+    last.c = c;
+    last.steps = steps;
+    last.sweep_ms = sweep_ms;
     snprintf(status_text, sizeof(status_text),
              "{\"type\":\"status\",\"linked\":%s,\"info\":\"%s\",\"start\":%u,\"stop\":%u,\"rate\":%u,"
              "\"dwell\":%u,\"det\":%u,\"gain\":%d,\"gain_max\":%u,\"steps\":%u,\"step_khz\":%u,"
-             "\"sweep_ms\":%u,\"error\":\"%s\"}",
+             "\"sweep_ms\":%u,\"error\":\"%s\",\"cal\":%d,\"bands\":%u,\"noise\":%s}",
              linked ? "true" : "false", info, c.start_mhz, c.stop_mhz, c.rate_code, c.dwell_ms,
              c.max_hold ? 1 : 0, c.gain, gain_max, steps, (unsigned)(2 * half_use_khz(c.rate_code)), sweep_ms,
-             receiver_error);
+             receiver_error, config.cal_tenths, config.bands, has_noise ? "true" : "false");
     status_dirty = true;
     xSemaphoreGive(lock);
+}
+/* Display-only settings and the noise reference take effect at once. */
+static void refresh_status() {
+    xSemaphoreTake(lock, portMAX_DELAY);
+    auto l = last;
+    xSemaphoreGive(lock);
+    set_status(l.linked, l.info, l.c, l.steps, l.sweep_ms);
 }
 
 /* Returns false only when the link broke. A rejected gain falls back to
@@ -86,6 +143,7 @@ static bool apply_receiver(SweepConfig &c) {
         c.gain = -1;
         xSemaphoreTake(lock, portMAX_DELAY);
         config.gain = -1;
+        settings_dirty = true;
         xSemaphoreGive(lock);
     }
     return sdr.command("GAIN HARDWARE");
@@ -190,7 +248,8 @@ static void sweep_task(void *) {
     }
 }
 
-/* "cfg start=5650 stop=5950 rate=1 dwell=25 det=1 gain=-1" */
+/* "cfg start=5650 stop=5850 rate=1 dwell=25 det=1 gain=-1 cal=0 bands=17",
+ * sent by the page's apply buttons; every accepted change is saved. */
 static void handle_text(const char *text) {
     if (strncmp(text, "cfg", 3)) return;
     xSemaphoreTake(lock, portMAX_DELAY);
@@ -207,23 +266,47 @@ static void handle_text(const char *text) {
         else if (!strcmp(key, "dwell")) c.dwell_ms = constrain(value, 5, 500);
         else if (!strcmp(key, "det")) c.max_hold = value != 0;
         else if (!strcmp(key, "gain")) c.gain = constrain(value, -1, 90);
+        else if (!strcmp(key, "cal")) c.cal_tenths = constrain(value, -1000, 1000);
+        else if (!strcmp(key, "bands")) c.bands = value & 0x1f;
     }
     if (c.stop_mhz < c.start_mhz + 5) c.stop_mhz = c.start_mhz + 5;
     xSemaphoreTake(lock, portMAX_DELAY);
+    const SweepConfig &o = config;
+    if (c.start_mhz != o.start_mhz || c.stop_mhz != o.stop_mhz || c.rate_code != o.rate_code ||
+        c.dwell_ms != o.dwell_ms || c.max_hold != o.max_hold || c.gain != o.gain)
+        config_changed = true;
     config = c;
-    config_changed = true;
+    settings_dirty = true;
     xSemaphoreGive(lock);
+    refresh_status();
+}
+
+static void store_noise(const uint8_t *data, size_t length) {
+    if (length != sizeof(noise) || memcmp(data, "NSE1", 4)) return;
+    memcpy(noise, data, sizeof(noise));
+    has_noise = true;
+    prefs.putBytes("noise", noise, sizeof(noise));
+    ws.broadcastBIN(noise, sizeof(noise));
+    refresh_status();
 }
 
 static void on_ws(uint8_t client, WStype_t type, uint8_t *payload, size_t length) {
     if (type == WStype_CONNECTED) {
+        if (has_noise) ws.sendBIN(client, noise, sizeof(noise));
         status_dirty = true;
     } else if (type == WStype_TEXT) {
         char text[128];
         size_t n = length < sizeof(text) - 1 ? length : sizeof(text) - 1;
         memcpy(text, payload, n);
         text[n] = '\0';
-        handle_text(text);
+        if (!strcmp(text, "noise clear")) {
+            has_noise = false;
+            prefs.remove("noise");
+            refresh_status();
+        } else
+            handle_text(text);
+    } else if (type == WStype_BIN) {
+        store_noise(payload, length);
     }
 }
 
@@ -237,6 +320,8 @@ static void redirect_to_portal() {
 void setup() {
     Serial.begin(115200);
     lock = xSemaphoreCreateMutex();
+    load_settings();
+    last.c = config;
     WiFi.mode(WIFI_AP);
     WiFi.softAP(AP_SSID, AP_PASSWORD, AP_CHANNEL);
     WiFi.setSleep(false);
@@ -270,7 +355,9 @@ void loop() {
         status_dirty = false;
         send_status = true;
     }
+    bool save = settings_dirty;
     xSemaphoreGive(lock);
+    if (save) save_settings();
     if (send_frame) ws.broadcastBIN(out, sizeof(out));
     if (send_status) ws.broadcastTXT(status_out);
     delay(2);
