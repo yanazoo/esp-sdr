@@ -20,7 +20,7 @@ struct SweepConfig {
     unsigned dwell_ms = 25;
     bool max_hold = true;
     bool spur_reject = true; /* measure every point from two LOs, keep the lower */
-    int gain = 40; /* -1: hardware AGC, otherwise a PHY gain index */
+    int gain = 10; /* -1: hardware AGC, otherwise a PHY gain index */
     /* Display only; changing them does not restart the sweep. */
     int cal_tenths = 0;      /* dBm = dBFS + cal_tenths / 10 */
     unsigned bands = 0x11;   /* FPV band lines shown: bit 0 A, 1 B, 2 E, 3 F, 4 R */
