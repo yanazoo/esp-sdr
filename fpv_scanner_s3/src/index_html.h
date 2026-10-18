@@ -66,7 +66,7 @@ label{white-space:nowrap}.note{color:var(--dim);font-size:12px}
 
 <div class="box"><h2>受信設定（適用で反映・保存）</h2>
 <div class="row">
- <label>ステップ幅 <select id="rate"><option value="0">40 MHz（80MS/s・速い）</option><option value="1">30 MHz（80MS/s・標準）</option><option value="2">15 MHz（40MS/s）</option><option value="3">7.5 MHz（20MS/s・細かい）</option></select></label>
+ <label>ステップ幅 <select id="rate"><option value="0">40 MHz（80MS/s・既定）</option><option value="1">30 MHz（80MS/s・強い電波の映り込みに強い）</option><option value="2">15 MHz（40MS/s）</option><option value="3">7.5 MHz（20MS/s・細かい）</option></select></label>
  <label>滞在 <input type="number" id="dwell" min="5" max="500"> ms/step</label>
  <label>検波 <select id="det"><option value="1">最大値</option><option value="0">平均</option></select></label>
  <label>ゲイン <input type="number" id="gain" min="-1" max="90"> <span id="grange">(-1=自動)</span></label>

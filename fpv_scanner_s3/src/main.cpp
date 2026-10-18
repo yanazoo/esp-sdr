@@ -16,10 +16,10 @@
 
 struct SweepConfig {
     unsigned start_mhz = DEFAULT_START_MHZ, stop_mhz = DEFAULT_STOP_MHZ;
-    unsigned rate_code = 1; /* step plan, see steps[]: 0: 40, 1: 30, 2: 15, 3: 7.5 MHz */
+    unsigned rate_code = 0; /* step plan, see steps[]: 0: 40, 1: 30, 2: 15, 3: 7.5 MHz */
     unsigned dwell_ms = 25;
     bool max_hold = true;
-    int gain = -1; /* -1: hardware AGC, otherwise a PHY gain index */
+    int gain = 40; /* -1: hardware AGC, otherwise a PHY gain index */
     /* Display only; changing them does not restart the sweep. */
     int cal_tenths = 0;      /* dBm = dBFS + cal_tenths / 10 */
     unsigned bands = 0x11;   /* FPV band lines shown: bit 0 A, 1 B, 2 E, 3 F, 4 R */
