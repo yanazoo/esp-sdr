@@ -38,10 +38,12 @@ struct StepPlan {
     unsigned half_khz, rate_code, fft_n, bandwidth_mhz;
 };
 static const StepPlan steps_plan[] = {
-    {20000, 0, 2048, 44}, /* 40 MHz steps, 80 MS/s, 39 kHz bins */
-    {15000, 0, 2048, 32}, /* 30 MHz steps, 80 MS/s, 39 kHz bins */
-    {7500, 1, 2048, 16},  /* 15 MHz steps, 40 MS/s, 20 kHz bins */
-    {3750, 2, 2048, 11},  /* 7.5 MHz steps, 20 MS/s, 10 kHz bins */
+    /* 1024 bins: a display point (1000 per span) never needs finer bins,
+     * and half the FFT size halves the C5's FFT time and UART transfer. */
+    {20000, 0, 1024, 44}, /* 40 MHz steps, 80 MS/s, 78 kHz bins */
+    {15000, 0, 1024, 32}, /* 30 MHz steps, 80 MS/s, 78 kHz bins */
+    {7500, 1, 1024, 16},  /* 15 MHz steps, 40 MS/s, 39 kHz bins */
+    {3750, 2, 1024, 11},  /* 7.5 MHz steps, 20 MS/s, 20 kHz bins */
 };
 static const unsigned capture_khz[] = {80000, 40000, 20000};
 static double half_use_khz(unsigned plan) {
@@ -360,8 +362,15 @@ static void store_noise(const uint8_t *data, size_t length) {
 
 static void on_ws(uint8_t client, WStype_t type, uint8_t *payload, size_t length) {
     if (type == WStype_CONNECTED) {
-        if (has_noise) ws.sendBIN(client, noise, sizeof(noise));
+        /* A (re)connecting page gets the latest sweep at once. */
+        static uint8_t latest[sizeof(frame)];
+        xSemaphoreTake(lock, portMAX_DELAY);
+        bool any = frame_seq != 0;
+        if (any) memcpy(latest, frame, sizeof(latest));
         status_dirty = true;
+        xSemaphoreGive(lock);
+        if (has_noise) ws.sendBIN(client, noise, sizeof(noise));
+        if (any) ws.sendBIN(client, latest, sizeof(latest));
     } else if (type == WStype_TEXT) {
         char text[128];
         size_t n = length < sizeof(text) - 1 ? length : sizeof(text) - 1;
@@ -385,6 +394,46 @@ static void redirect_to_portal() {
     http.send(302, "text/plain", "");
 }
 
+/* WebSocket traffic and settings storage run in their own task, so a slow
+ * HTTP client (a browser's idle preconnect can hold the synchronous
+ * WebServer for seconds) never delays spectrum frames. */
+static void ws_task(void *) {
+    static uint8_t out[HEADER + SWEEP_POINTS];
+    static char status_out[sizeof(status_text)];
+    uint32_t last_send = 0;
+    for (;;) {
+        ws.loop();
+        /* Status at least every 2 s, so pages can tell a long sweep from a
+         * dead connection (they reconnect after 5 s of silence). */
+        if (millis() - last_send > 2000) {
+            xSemaphoreTake(lock, portMAX_DELAY);
+            status_dirty = true;
+            xSemaphoreGive(lock);
+        }
+        bool send_frame = false, send_status = false;
+        xSemaphoreTake(lock, portMAX_DELAY);
+        if (frame_seq != sent_seq) {
+            memcpy(out, frame, sizeof(out));
+            sent_seq = frame_seq;
+            send_frame = true;
+        }
+        if (status_dirty) {
+            strlcpy(status_out, status_text, sizeof(status_out));
+            status_dirty = false;
+            send_status = true;
+        }
+        bool save = settings_dirty;
+        xSemaphoreGive(lock);
+        if (save) save_settings();
+        if (send_frame) ws.broadcastBIN(out, sizeof(out));
+        if (send_status) {
+            ws.broadcastTXT(status_out);
+            last_send = millis();
+        }
+        vTaskDelay(pdMS_TO_TICKS(2));
+    }
+}
+
 void setup() {
     Serial.begin(115200);
     lock = xSemaphoreCreateMutex();
@@ -400,33 +449,17 @@ void setup() {
     http.begin();
     ws.begin();
     ws.onEvent(on_ws);
+    /* Drop phones that went silent (sleep, out of range) instead of
+     * queueing frames to a dead connection. */
+    ws.enableHeartbeat(3000, 2000, 2);
     sdr.begin(SDR_RX_PIN, SDR_TX_PIN, SDR_BAUD);
     xTaskCreatePinnedToCore(sweep_task, "sweep", 8192, nullptr, 2, nullptr, 0);
+    xTaskCreatePinnedToCore(ws_task, "ws", 8192, nullptr, 3, nullptr, 1);
     Serial.printf("AP %s  http://%s/\n", AP_SSID, WiFi.softAPIP().toString().c_str());
 }
 
 void loop() {
-    static uint8_t out[HEADER + SWEEP_POINTS];
-    static char status_out[sizeof(status_text)];
     dns.processNextRequest();
     http.handleClient();
-    ws.loop();
-    bool send_frame = false, send_status = false;
-    xSemaphoreTake(lock, portMAX_DELAY);
-    if (frame_seq != sent_seq) {
-        memcpy(out, frame, sizeof(out));
-        sent_seq = frame_seq;
-        send_frame = true;
-    }
-    if (status_dirty) {
-        strlcpy(status_out, status_text, sizeof(status_out));
-        status_dirty = false;
-        send_status = true;
-    }
-    bool save = settings_dirty;
-    xSemaphoreGive(lock);
-    if (save) save_settings();
-    if (send_frame) ws.broadcastBIN(out, sizeof(out));
-    if (send_status) ws.broadcastTXT(status_out);
     delay(2);
 }
