@@ -19,7 +19,6 @@ struct SweepConfig {
     unsigned rate_code = 0; /* step plan, see steps[]: 0: 40, 1: 30, 2: 15, 3: 7.5 MHz */
     unsigned dwell_ms = 25;
     bool max_hold = true;
-    bool spur_reject = false; /* measure every point from two LOs, keep the lower */
     int gain = 10; /* -1: hardware AGC, otherwise a PHY gain index */
     /* Display only; changing them does not restart the sweep. */
     int cal_tenths = 0;      /* dBm = dBFS + cal_tenths / 10 */
@@ -81,7 +80,6 @@ static void load_settings() {
     c.rate_code = prefs.getUInt("rate", c.rate_code);
     c.dwell_ms = prefs.getUInt("dwell", c.dwell_ms);
     c.max_hold = prefs.getBool("det", c.max_hold);
-    c.spur_reject = prefs.getBool("spur", c.spur_reject);
     c.gain = prefs.getInt("gain", c.gain);
     c.cal_tenths = prefs.getInt("cal", c.cal_tenths);
     c.bands = prefs.getUInt("bands", c.bands);
@@ -94,6 +92,7 @@ static void load_settings() {
      * settings they were taken with, so they are discarded once. */
     has_noise = prefs.getBytes("noise", noise, sizeof(noise)) == sizeof(noise) && !memcmp(noise, "NSE2", 4);
     if (!has_noise && prefs.isKey("noise")) prefs.remove("noise");
+    if (prefs.isKey("spur")) prefs.remove("spur"); /* setting of earlier builds */
 }
 
 static void save_settings() {
@@ -106,7 +105,6 @@ static void save_settings() {
     prefs.putUInt("rate", c.rate_code);
     prefs.putUInt("dwell", c.dwell_ms);
     prefs.putBool("det", c.max_hold);
-    prefs.putBool("spur", c.spur_reject);
     prefs.putInt("gain", c.gain);
     prefs.putInt("cal", c.cal_tenths);
     prefs.putUInt("bands", c.bands);
@@ -139,12 +137,12 @@ static void set_status(bool linked, const char *info, const SweepConfig &c, unsi
              "{\"type\":\"status\",\"linked\":%s,\"info\":\"%s\",\"start\":%u,\"stop\":%u,\"rate\":%u,"
              "\"dwell\":%u,\"det\":%u,\"gain\":%d,\"gain_max\":%u,\"steps\":%u,\"step_khz\":%u,"
              "\"sweep_ms\":%u,\"error\":\"%s\",\"cal\":%d,\"bands\":%u,\"noise\":%s,"
-             "\"markers\":[%d,%d,%d,%d],\"hold\":%u,\"avg\":%u,\"ytop\":%d,\"yrange\":%d,\"spur\":%u}",
+             "\"markers\":[%d,%d,%d,%d],\"hold\":%u,\"avg\":%u,\"ytop\":%d,\"yrange\":%d}",
              linked ? "true" : "false", info, c.start_mhz, c.stop_mhz, c.rate_code, c.dwell_ms,
              c.max_hold ? 1 : 0, c.gain, gain_max, steps, (unsigned)(2 * half_use_khz(c.rate_code)), sweep_ms,
              receiver_error, config.cal_tenths, config.bands, has_noise ? "true" : "false", config.markers[0],
              config.markers[1], config.markers[2], config.markers[3], config.hold, config.avg, config.ytop,
-             config.yrange, c.spur_reject);
+             config.yrange);
     status_dirty = true;
     xSemaphoreGive(lock);
 }
@@ -173,7 +171,7 @@ static bool apply_receiver(SweepConfig &c) {
         reply[0] = '\0';
         if (sdr.command(cmd, reply, sizeof(reply)) && !strcmp(reply, "OK")) return true;
         if (strncmp(reply, "ERR", 3)) return false;
-        snprintf(receiver_error, sizeof(receiver_error), "gain %d rejected (2-%u), using AGC", c.gain, gain_max);
+        snprintf(receiver_error, sizeof(receiver_error), "ゲイン%dは範囲外(2〜%u)のため自動に変更", c.gain, gain_max);
         c.gain = -1;
         xSemaphoreTake(lock, portMAX_DELAY);
         config.gain = -1;
@@ -194,8 +192,6 @@ static void sweep_task(void *) {
     static uint8_t bins[2048];
     static uint8_t trace[SWEEP_POINTS];
     static bool filled[SWEEP_POINTS];
-    static uint8_t step_trace[SWEEP_POINTS];
-    static bool step_hit[SWEEP_POINTS];
     SweepConfig c;
     for (;;) {
         if (!sdr.connected()) {
@@ -226,11 +222,7 @@ static void sweep_task(void *) {
         const unsigned fft_n = plan.fft_n;
         const double fs = capture_khz[plan.rate_code], half_use = plan.half_khz;
         const double start = c.start_mhz * 1000.0, stop = c.stop_mhz * 1000.0, span = stop - start;
-        /* Optional spur rejection: LOs spaced half a step apart see each
-         * point twice at different offsets; a real signal appears in both,
-         * a receiver spur or image in only one, so the lower is kept. */
-        const double spacing = c.spur_reject ? half_use : 2 * half_use;
-        const unsigned steps = c.spur_reject ? (unsigned)ceil(span / spacing) + 1 : (unsigned)ceil(span / spacing);
+        const unsigned steps = (unsigned)ceil(span / (2 * half_use));
         memset(trace, 0, sizeof(trace));
         memset(filled, 0, sizeof(filled));
         uint32_t t0 = millis();
@@ -241,11 +233,9 @@ static void sweep_task(void *) {
                 restarted = true;
                 break;
             }
-            unsigned centre_mhz = (unsigned)lround(
-                (c.spur_reject ? start + s * spacing : start + (2 * s + 1) * half_use) / 1000.0);
+            unsigned centre_mhz = (unsigned)lround((start + (2 * s + 1) * half_use) / 1000.0);
             ok = sdr.spectrum(centre_mhz, plan.rate_code, fft_n, c.dwell_ms, c.max_hold, bins);
             if (!ok) break;
-            memset(step_hit, 0, sizeof(step_hit));
             for (unsigned k = 0; k < fft_n; k++) {
                 int signed_k = k < fft_n / 2 ? (int)k : (int)k - (int)fft_n;
                 if (abs(signed_k) <= 2) continue;
@@ -258,15 +248,7 @@ static void sweep_task(void *) {
                 if (f < start || f >= stop) continue;
                 unsigned i = (unsigned)((f - start) / span * SWEEP_POINTS);
                 if (i >= SWEEP_POINTS) continue;
-                if (!step_hit[i] || bins[k] > step_trace[i]) step_trace[i] = bins[k];
-                step_hit[i] = true;
-            }
-            /* Within a step a point keeps its strongest bin; across steps
-             * the lower reading wins when rejecting spurs. */
-            for (unsigned i = 0; i < SWEEP_POINTS; i++) {
-                if (!step_hit[i]) continue;
-                if (!filled[i] || (c.spur_reject ? step_trace[i] < trace[i] : step_trace[i] > trace[i]))
-                    trace[i] = step_trace[i];
+                if (!filled[i] || bins[k] > trace[i]) trace[i] = bins[k];
                 filled[i] = true;
             }
         }
@@ -321,7 +303,6 @@ static void handle_text(const char *text) {
         else if (!strcmp(key, "rate")) c.rate_code = constrain(value, 0, 3);
         else if (!strcmp(key, "dwell")) c.dwell_ms = constrain(value, 5, 500);
         else if (!strcmp(key, "det")) c.max_hold = value != 0;
-        else if (!strcmp(key, "spur")) c.spur_reject = value != 0;
         else if (!strcmp(key, "gain")) c.gain = constrain(value, -1, 90);
         else if (!strcmp(key, "cal")) c.cal_tenths = constrain(value, -1000, 1000);
         else if (!strcmp(key, "bands")) c.bands = value & 0x1f;
@@ -336,7 +317,7 @@ static void handle_text(const char *text) {
     xSemaphoreTake(lock, portMAX_DELAY);
     const SweepConfig &o = config;
     if (c.start_mhz != o.start_mhz || c.stop_mhz != o.stop_mhz || c.rate_code != o.rate_code ||
-        c.dwell_ms != o.dwell_ms || c.max_hold != o.max_hold || c.gain != o.gain || c.spur_reject != o.spur_reject)
+        c.dwell_ms != o.dwell_ms || c.max_hold != o.max_hold || c.gain != o.gain)
         config_changed = true;
     /* A noise reference taken at another gain, rate or detector no longer
      * matches the trace, so it is dropped rather than shown misleadingly. */

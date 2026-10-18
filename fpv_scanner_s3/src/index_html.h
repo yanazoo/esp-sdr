@@ -7,7 +7,8 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(<!doctype html>
 <title>5.8GHz FPV Scanner</title>
 <style>
 *{box-sizing:border-box}body{margin:0;background:#0d1117;color:#e6edf3;font:14px system-ui,sans-serif}
-header{display:flex;justify-content:space-between;padding:6px 10px;background:#161b22;font-size:12px;color:#8b949e}
+header{display:flex;gap:8px;justify-content:space-between;padding:6px 10px;background:#161b22;font-size:12px;color:#8b949e}
+header .err{flex:1;text-align:center}
 #st.ok{color:#3fb950}#st.ng,.err{color:#f85149}
 main{padding:6px;max-width:1100px;margin:auto}
 #cv{width:100%;height:45vh;min-height:240px;background:#000;border:1px solid #30363d;touch-action:none;display:block}
@@ -16,12 +17,11 @@ main{padding:6px;max-width:1100px;margin:auto}
 input,select,button{background:#0d1117;color:#e6edf3;border:1px solid #30363d;border-radius:4px;padding:5px;font-size:14px}
 input[type=number]{width:72px}button.on{background:#1f6feb}button.dirty{border-color:#d29922;color:#d29922}
 table{border-collapse:collapse;width:100%;font-size:12px}td,th{border:1px solid #30363d;padding:4px 2px;text-align:center}
-td.ch{cursor:pointer}
+td.ch{cursor:pointer}#mt td:first-child,#mt th:first-child{width:1%;white-space:nowrap;padding:4px 6px}#mt td,#mt th{width:33%}
 </style></head><body>
-<header><span id="info">-</span><span id="st">接続中…</span></header>
+<header><span id="info">-</span><span id="err" class="err"></span><span id="st">接続中…</span></header>
 <main>
 <canvas id="cv"></canvas>
-<div id="warn" class="err" style="display:none;font-size:12px">入力が強すぎます。ゲインを下げてください。</div>
 
 <div class="box">
 <div class="row">
@@ -29,7 +29,7 @@ td.ch{cursor:pointer}
  <button class="mb" data-m="2" style="color:#f6f">M3</button><button class="mb" data-m="3" style="color:#6f6">M4</button>
  <button id="mpk">ピーク</button><button id="mclr">消去</button><button id="msave">保存</button>
 </div>
-<table><tr><th>#</th><th>MHz</th><th>dBm</th><th>ch</th></tr><tbody id="mk"></tbody></table>
+<table id="mt"><tr><th>マーカー</th><th>dBm</th><th>ch</th><th>MHz</th></tr><tbody id="mk"></tbody></table>
 <div style="overflow-x:auto;margin-top:6px"><table id="fpv"></table></div>
 <div class="row">表示バンド <span id="bandsel"></span><button id="applyb">適用</button></div>
 </div>
@@ -42,13 +42,12 @@ td.ch{cursor:pointer}
 
 <div class="box"><div class="row">
  <label>ステップ <select id="rate"><option value="0">40MHz</option><option value="1">30MHz</option><option value="2">15MHz</option><option value="3">7.5MHz</option></select></label>
- <label>スプリアス除去 <select id="spur"><option value="1">ON</option><option value="0">OFF</option></select></label>
  <label>滞在 <input type="number" id="dwell"> ms</label>
  <label>検波 <select id="det"><option value="1">最大</option><option value="0">平均</option></select></label>
- <label>ゲイン <input type="number" id="gain"></label>
+ <label>ゲイン <input type="number" id="gain"> <span id="grange" style="font-size:12px;color:#8b949e">-1=自動、2〜（小さいほど強い電波向き、大きいほど弱い電波向き）</span></label>
  <label>補正 <input type="number" id="cal" step="0.1"> dB</label>
  <button id="applyr">適用</button>
-</div><div id="err" class="err"></div></div>
+</div></div>
 
 <div class="box"><div class="row">
  ノイズ <button id="nsave">保存</button><button id="nclr">消去</button><span id="nst"></span>
@@ -63,7 +62,8 @@ td.ch{cursor:pointer}
 <script>
 const BANDS={A:[5865,5845,5825,5805,5785,5765,5745,5725],B:[5733,5752,5771,5790,5809,5828,5847,5866],
 E:[5705,5685,5665,5645,5885,5905,5925,5945],F:[5740,5760,5780,5800,5820,5840,5860,5880],R:[5658,5695,5732,5769,5806,5843,5880,5917]};
-const BK=Object.keys(BANDS),BCOL={A:'#ff9e64',B:'#9ece6a',E:'#bb9af7',F:'#7dcfff',R:'#f7768e'},MCOL=['#ff6','#6ff','#f6f','#6f6'];
+const BK=Object.keys(BANDS),BCOL={A:'#ff9e64',B:'#9ece6a',E:'#bb9af7',F:'#7dcfff',R:'#f7768e'},MCOL=['#ff6','#6ff','#f6f','#6f6'],MBG=['#ffff6633','#66ffff33','#ff66ff33','#66ff6633'];
+let warn='';
 let cfg={},data=null,peak=null,avg=null,noise=null,f0=5650,f1=5850,act=0,markers=[null,null,null,null],ws,lastMsg=0,queued=false;
 const $=id=>document.getElementById(id),cv=$('cv'),ctx=cv.getContext('2d');
 const dbm=c=>c/2-84.3+(cfg.cal||0)/10;
@@ -92,21 +92,21 @@ function draw(){
   ctx.fillStyle=MCOL[m];ctx.beginPath();ctx.moveTo(x,y-2*r);ctx.lineTo(x-5*r,y-11*r);ctx.lineTo(x+5*r,y-11*r);ctx.fill();ctx.fillText('M'+(m+1),x,y-13*r)});
 }
 function renderMarkers(){$('mk').innerHTML=markers.map((f,m)=>{const lv=f===null?null:level(f);
- return `<tr style="color:${MCOL[m]}"><td>M${m+1}${m===act?'◀':''}</td><td>${f===null?'-':f.toFixed(1)}</td><td>${lv===null?'-':lv.toFixed(1)}</td><td>${f===null?'-':nearestCh(f)}</td></tr>`}).join('')}
+ return `<tr style="color:${MCOL[m]}"><td>M${m+1}${m===act?'◀':''}</td><td>${lv===null?'-':lv.toFixed(1)}</td><td>${f===null?'-':nearestCh(f)}</td><td>${f===null?'-':f.toFixed(1)}</td></tr>`}).join('')}
 function renderFpv(){$('fpv').innerHTML='<tr><th></th>'+[1,2,3,4,5,6,7,8].map(c=>'<th>'+c+'</th>').join('')+'</tr>'+BK.map(b=>`<tr><th style="color:${BCOL[b]}">${b}</th>`+
- BANDS[b].map(f=>{const m=markers.indexOf(f);return `<td class="ch" data-f="${f}"${m>=0?` style="outline:2px solid ${MCOL[m]}"`:''}>${f}</td>`}).join('')+'</tr>').join('')}
+ BANDS[b].map(f=>{const m=markers.indexOf(f);return `<td class="ch" data-f="${f}"${m>=0?` style="outline:2px solid ${MCOL[m]};background:${MBG[m]}"`:''}>${f}</td>`}).join('')+'</tr>').join('')}
 function placed(){renderFpv();redraw();const s=(cfg.markers||[]).map(t=>t<0?null:t/10);$('msave').classList.toggle('dirty',markers.some((f,m)=>f!==(s[m]??null)))}
 // ---- settings: forms are filled from the saved values once, then edited until applied
-function fillForm(s){$('start').value=s.start;$('stop').value=s.stop;$('rate').value=s.rate;$('spur').value=s.spur;$('dwell').value=s.dwell;$('det').value=s.det;
+function fillForm(s){$('start').value=s.start;$('stop').value=s.stop;$('rate').value=s.rate;$('dwell').value=s.dwell;$('det').value=s.det;
  $('gain').value=s.gain;$('cal').value=(s.cal/10).toFixed(1);$('hold').checked=!!s.hold;$('avg').checked=!!s.avg;$('ytop').value=s.ytop;$('yrng').value=s.yrange;
  document.querySelectorAll('#bandsel input').forEach(i=>i.checked=shown(i.dataset.b));markers=s.markers.map(t=>t<0?null:t/10);placed()}
 function send(t){if(ws&&ws.readyState===1){ws.send(t);return true}alert('S3に接続されていません');return false}
 function apply(t,btn){if(send(t))btn.classList.remove('dirty')}
 const dirtyOn=(ids,btn)=>ids.forEach(id=>$(id).oninput=()=>$(btn).classList.add('dirty'));
-dirtyOn(['start','stop'],'applys');dirtyOn(['rate','spur','dwell','det','gain','cal'],'applyr');dirtyOn(['hold','avg','ytop','yrng'],'applyd');
+dirtyOn(['start','stop'],'applys');dirtyOn(['rate','dwell','det','gain','cal'],'applyr');dirtyOn(['hold','avg','ytop','yrng'],'applyd');
 document.querySelectorAll('.pre').forEach(b=>b.onclick=()=>{$('start').value=b.dataset.a;$('stop').value=b.dataset.b;$('applys').classList.add('dirty')});
 $('applys').onclick=()=>{const a=Math.round(+$('start').value),b=Math.max(a+5,Math.round(+$('stop').value));apply(`cfg start=${a} stop=${b}`,$('applys'))};
-$('applyr').onclick=()=>apply(`cfg rate=${$('rate').value} spur=${$('spur').value} dwell=${$('dwell').value} det=${$('det').value} gain=${$('gain').value} cal=${Math.round(+$('cal').value*10)}`,$('applyr'));
+$('applyr').onclick=()=>apply(`cfg rate=${$('rate').value} dwell=${$('dwell').value} det=${$('det').value} gain=${$('gain').value} cal=${Math.round(+$('cal').value*10)}`,$('applyr'));
 $('applyd').onclick=()=>apply(`cfg hold=${+$('hold').checked} avg=${+$('avg').checked} ytop=${Math.round(+$('ytop').value)} yrange=${Math.round(+$('yrng').value)}`,$('applyd'));
 for(const b of BK){const l=document.createElement('label');l.innerHTML=`<input type="checkbox" data-b="${b}"><span style="color:${BCOL[b]}">${b}</span> `;
  l.firstChild.onchange=()=>$('applyb').classList.add('dirty');$('bandsel').appendChild(l)}
@@ -127,14 +127,17 @@ function onStatus(s){const first=!cfg.start;if(cfg.rate!==s.rate||cfg.det!==s.de
  if(!s.noise)noise=null;cfg=s;if(first)fillForm(s);
  $('st').textContent=s.linked?'C5接続':'C5未接続';$('st').className=s.linked?'ok':'ng';
  $('info').textContent=`${s.start}-${s.stop}MHz ${s.steps}step ${s.sweep_ms}ms`;$('nst').textContent=s.noise?'保存済み':'';
- $('err').textContent=s.error;if(s.error)$('gain').value=s.gain;placed()}
+ gerr=s.error;showErr();if(s.error)$('gain').value=s.gain;
+ if(s.gain_max)$('grange').textContent=`-1=自動、2〜${s.gain_max}（小さいほど強い電波向き、大きいほど弱い電波向き）`;placed()}
+// Errors and warnings share the header bar.
+let gerr='';function showErr(){$('err').textContent=[gerr,warn].filter(Boolean).join(' / ')}
 function onFrame(buf){const v=new DataView(buf),magic=v.getUint32(0,true),a=v.getUint32(4,true)/1000,b=v.getUint32(8,true)/1000,t=new Uint8Array(buf,24,v.getUint16(12,true));
  if(magic===0x3245534e){noise={a,b,t:Uint8Array.from(t)};redraw();return}
  if(magic!==0x31565046)return;
  if(a!==f0||b!==f1||!data||data.length!==t.length){f0=a;f1=b;peak=null;avg=null}
  data=Uint8Array.from(t);peak=peak?peak.map((p,i)=>Math.max(p,t[i])):Uint8Array.from(t);avg=avg?avg.map((p,i)=>p*0.8+t[i]*0.2):Float32Array.from(t);
  // Wide signals near -30 dBFS per bin already add up to ADC full scale.
- $('warn').style.display=Math.max(...t)/2-84.3>-30?'':'none';redraw()}
+ const w=Math.max(...t)/2-84.3>-30?'入力が強すぎます。ゲインを下げてください':'';if(w!==warn){warn=w;showErr()}redraw()}
 function connect(){ws=new WebSocket('ws://'+location.hostname+':81/');ws.binaryType='arraybuffer';lastMsg=Date.now();
  ws.onmessage=e=>{lastMsg=Date.now();typeof e.data==='string'?onStatus(JSON.parse(e.data)):onFrame(e.data)};
  ws.onclose=()=>{$('st').textContent='再接続中';$('st').className='ng';setTimeout(connect,1000)}}
