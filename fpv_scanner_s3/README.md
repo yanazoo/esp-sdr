@@ -38,14 +38,15 @@ TX と RX はたすき掛けです。C5 は無線起動時に電流が増える�
 
 1. Visual Studio Code に PlatformIO 拡張を入れる
 2. このフォルダ `fpv_scanner_s3` を「フォルダーを開く」で開く
-3. **`src/config.h` の `AP_SSID` / `AP_PASSWORD` を自分用に変更する**
-   （リポジトリ上の値は公開用の仮の値です。パスワードは 8 文字以上）
+3. Wi-Fi の初期値は SSID `FPV-Scanner`、パスワード `fpv-sa00` です（公開済みの値）。
+   変更する場合は `src/config.h` の `AP_SSID` / `AP_PASSWORD` を書き換えます
+   （パスワードは 8 文字以上）
 4. S3 を USB 接続し、PlatformIO の「Upload」（→ボタン）で書き込む
 
 ## 4. 使い方
 
 1. 両方のボードに電源を入れる
-2. スマホで Wi-Fi `config.h` の SSID に接続する
+2. スマホで Wi-Fi `FPV-Scanner` にパスワード `fpv-sa00` で接続する
 3. ブラウザで <http://192.168.4.1/> を開く
 
 画面の機能:

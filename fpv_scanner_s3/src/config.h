@@ -1,9 +1,9 @@
 #pragma once
 /* ---- Wi-Fi access point (2.4 GHz) -----------------------------------
- * Placeholder values for publication. Change both before use; the
- * password must have at least 8 characters. */
+ * These values are public (committed to the repository). WPA2 needs a
+ * password of at least 8 characters. */
 #define AP_SSID     "FPV-Scanner"
-#define AP_PASSWORD "changeme123"
+#define AP_PASSWORD "fpv-sa00"
 #define AP_CHANNEL  1
 
 /* ---- UART link to the XIAO ESP32-C5 (ESP-SDR firmware) ---------------
