@@ -154,6 +154,8 @@ TX と RX はたすき掛けです。C5 は無線起動時に電流が増える�
 
 ## ファイル構成
 
+- `SETTINGS.md`: ステップ幅・滞在時間・検波・ゲイン・補正値の解説と使い分け
+
 - `platformio.ini`: PlatformIO 設定（board = seeed_xiao_esp32s3, Arduino）
 - `src/config.h`: Wi-Fi 名・パスワード、UART ピン、初回起動時のスパン
 - `src/sdr_link.*`: ESP-SDR の UART プロトコル（`SYNC`, `FREQ`, `SPEC`）クライアント
